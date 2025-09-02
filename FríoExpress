@@ -1,0 +1,424 @@
+import java.util.*;
+import java.time.*;
+
+// ======================= EXCEPCIONES PERSONALIZADAS =======================
+
+class StockInsuficienteException extends Exception {
+    public StockInsuficienteException(String msg) { super(msg); }
+}
+
+class CadenaFrioRotaException extends Exception {
+    public CadenaFrioRotaException(String msg) { super(msg); }
+}
+
+class LimiteCreditoExcedidoException extends Exception {
+    public LimiteCreditoExcedidoException(String msg) { super(msg); }
+}
+
+class ProductoNoCongeladoException extends Exception {
+    public ProductoNoCongeladoException(String msg) { super(msg); }
+}
+
+class StockMinimoAlcanzadoException extends Exception {
+    public StockMinimoAlcanzadoException(String msg) { super(msg); }
+}
+
+// ======================= MODELO DE DOMINIO ================================
+
+enum Categoria { CARNES, PESCADOS, VEGETALES, HELADOS }
+
+// Producto congelado con datos básicos
+class ProductoCongelado {
+    private final int codigo;
+    private final String nombre;
+    private final Categoria categoria;
+    private final double temperaturaRequerida;         // °C (p.ej., -18)
+    private double stockKg;                             // stock actual
+    private final double stockMinKg;                    // stock mínimo de seguridad
+    private final double precioPorKg;
+    private boolean cadenaFrioRota = false;             // bandera de alerta
+
+    public ProductoCongelado(int codigo, String nombre, Categoria categoria,
+                             double temperaturaRequerida, double stockKg,
+                             double stockMinKg, double precioPorKg) {
+        this.codigo = codigo;
+        this.nombre = nombre;
+        this.categoria = categoria;
+        this.temperaturaRequerida = temperaturaRequerida;
+        this.stockKg = stockKg;
+        this.stockMinKg = stockMinKg;
+        this.precioPorKg = precioPorKg;
+    }
+
+    // --- Getters esenciales ---
+    public int getCodigo() { return codigo; }
+    public String getNombre() { return nombre; }
+    public Categoria getCategoria() { return categoria; }
+    public double getTemperaturaRequerida() { return temperaturaRequerida; }
+    public double getStockKg() { return stockKg; }
+    public double getStockMinKg() { return stockMinKg; }
+    public double getPrecioPorKg() { return precioPorKg; }
+    public boolean isCadenaFrioRota() { return cadenaFrioRota; }
+
+    public void setCadenaFrioRota(boolean rota) { this.cadenaFrioRota = rota; }
+
+    // Incrementa stock (ingreso de mercadería)
+    public void agregarStock(double kg) {
+        if (kg <= 0) return;
+        this.stockKg += kg;
+    }
+
+    // Descuenta stock respetando mínimo y disponible
+    public void retirarStock(double kg)
+            throws StockInsuficienteException, StockMinimoAlcanzadoException {
+        if (kg <= 0) return;
+        if (kg > stockKg) { // no hay suficiente para vender
+            throw new StockInsuficienteException(
+                "Stock insuficiente del producto " + codigo + " (" + nombre + "). Disponible: " + stockKg + " kg");
+        }
+        double nuevoStock = stockKg - kg;
+        // La regla de negocio exige NO bajar al mínimo de seguridad
+        if (nuevoStock <= stockMinKg) {
+            throw new StockMinimoAlcanzadoException(
+                "No se puede vender. El producto " + codigo + " alcanzaría/caería por debajo del stock mínimo (" +
+                stockMinKg + " kg). Stock actual: " + stockKg + " kg, solicitado: " + kg + " kg");
+        }
+        this.stockKg = nuevoStock;
+    }
+
+    @Override
+    public String toString() {
+        return String.format("[%d] %-20s | %s | stock: %.1fkg (min: %.1f) | $/kg: %.2f%s",
+                codigo, nombre, categoria, stockKg, stockMinKg, precioPorKg,
+                cadenaFrioRota ? " | ALERTA: Cadena de frío rota" : "");
+    }
+}
+
+// Cliente con control de crédito
+class Cliente {
+    private final String rut;
+    private final String razonSocial;
+    private final String direccionEntrega;
+    private final double limiteCredito;
+    private double deudaActual;
+
+    public Cliente(String rut, String razonSocial, String direccionEntrega,
+                   double limiteCredito, double deudaActual) {
+        this.rut = rut;
+        this.razonSocial = razonSocial;
+        this.direccionEntrega = direccionEntrega;
+        this.limiteCredito = limiteCredito;
+        this.deudaActual = deudaActual;
+    }
+
+    public String getRut() { return rut; }
+    public String getRazonSocial() { return razonSocial; }
+    public String getDireccionEntrega() { return direccionEntrega; }
+    public double getLimiteCredito() { return limiteCredito; }
+    public double getDeudaActual() { return deudaActual; }
+    public double getCreditoDisponible() { return limiteCredito - deudaActual; }
+
+    // Aumenta la deuda si hay crédito disponible
+    public void cargarCompra(double monto) throws LimiteCreditoExcedidoException {
+        if (deudaActual + monto > limiteCredito) {
+            throw new LimiteCreditoExcedidoException(
+                "Crédito excedido para cliente " + razonSocial +
+                ". Disponible: $" + getCreditoDisponible() + ", intento: $" + monto);
+        }
+        deudaActual += monto;
+    }
+
+    public void abonar(double monto) { deudaActual = Math.max(0, deudaActual - monto); }
+
+    @Override
+    public String toString() {
+        return String.format("%s (%s) | Entrega: %s | Crédito: $%.2f | Deuda: $%.2f",
+                razonSocial, rut, direccionEntrega, limiteCredito, deudaActual);
+    }
+}
+
+// Ítems del pedido (cantidad y referencia al código del producto)
+class PedidoItem {
+    final int codigoProducto;
+    final double kilos;
+
+    public PedidoItem(int codigoProducto, double kilos) {
+        this.codigoProducto = codigoProducto;
+        this.kilos = kilos;
+    }
+}
+
+// Pedido de cliente
+class Pedido {
+    private static int SEQ = 1;
+
+    private final String id;
+    private final Cliente cliente;
+    private final List<PedidoItem> items = new ArrayList<>();
+    private double total;                  // se calcula al procesar
+    private final LocalDateTime creado = LocalDateTime.now();
+
+    public Pedido(Cliente cliente) {
+        this.id = "P" + (SEQ++);
+        this.cliente = cliente;
+    }
+
+    public String getId() { return id; }
+    public Cliente getCliente() { return cliente; }
+    public List<PedidoItem> getItems() { return items; }
+    public double getTotal() { return total; }
+    public void setTotal(double t) { total = t; }
+
+    public void agregarItem(int codigoProducto, double kilos) {
+        items.add(new PedidoItem(codigoProducto, kilos));
+    }
+
+    @Override
+    public String toString() {
+        return String.format("%s | Cliente: %s | Ítems: %d | Total: $%.2f | %s",
+                id, cliente.getRazonSocial(), items.size(), total, creado);
+    }
+}
+
+// ======================= INVENTARIO (Iterable + índices) ===================
+
+class Inventario implements Iterable<ProductoCongelado> {
+    // Productos ordenados por código (requisito: TreeMap)
+    private final TreeMap<Integer, ProductoCongelado> productos = new TreeMap<>();
+
+    // Índice opcional por categoría para búsquedas rápidas (HashMap)
+    private final Map<Categoria, List<ProductoCongelado>> indicePorCategoria = new HashMap<>();
+
+    // Registro simple de alertas de temperatura
+    private final List<String> alertasTemperatura = new ArrayList<>();
+
+    public void registrarProducto(ProductoCongelado p) {
+        productos.put(p.getCodigo(), p);
+        indicePorCategoria.computeIfAbsent(p.getCategoria(), k -> new ArrayList<>()).add(p);
+    }
+
+    // Búsqueda estricta: si no existe, lanza excepción
+    public ProductoCongelado buscarProducto(int codigo) throws ProductoNoCongeladoException {
+        ProductoCongelado p = productos.get(codigo);
+        if (p == null)
+            throw new ProductoNoCongeladoException("No existe producto con código " + codigo);
+        return p;
+    }
+
+    // Ingreso de mercadería (usa throws y se maneja donde se llame)
+    public void registrarIngreso(int codigo, double kilos)
+            throws ProductoNoCongeladoException {
+        ProductoCongelado p = buscarProducto(codigo);
+        p.agregarStock(kilos);
+    }
+
+    // Control de temperatura: si estuvo >30 min fuera de temp, marca y alerta
+    public void registrarQuiebreCadenaFrio(int codigo, int minutosFuera)
+            throws ProductoNoCongeladoException, CadenaFrioRotaException {
+        ProductoCongelado p = buscarProducto(codigo);
+        if (minutosFuera > 30) {
+            p.setCadenaFrioRota(true);
+            String alerta = "ALERTA: Producto " + p.getCodigo() + " (" + p.getNombre() +
+                    ") con posible quiebre de cadena de frío. Minutos fuera: " + minutosFuera;
+            alertasTemperatura.add(alerta);
+            throw new CadenaFrioRotaException(alerta);
+        }
+        // Si no supera 30 min, solo registramos internamente
+        alertasTemperatura.add("Seguimiento: " + p.getCodigo() + " fuera " + minutosFuera + " min (ok).");
+    }
+
+    // Reporte de productos con stock <= mínimo
+    public List<ProductoCongelado> consultarBajoStockMinimo() {
+        List<ProductoCongelado> res = new ArrayList<>();
+        for (var p : productos.values()) {
+            if (p.getStockKg() <= p.getStockMinKg()) res.add(p);
+        }
+        return res;
+    }
+
+    public List<String> getAlertasTemperatura() { return alertasTemperatura; }
+
+    // Iteración de productos para reportes
+    @Override
+    public Iterator<ProductoCongelado> iterator() {
+        return productos.values().iterator();
+    }
+
+    // Acceso por categoría (índice opcional)
+    public List<ProductoCongelado> buscarPorCategoria(Categoria c) {
+        return indicePorCategoria.getOrDefault(c, Collections.emptyList());
+    }
+}
+
+// ======================= SERVICIO DE GESTIÓN ===============================
+
+class SistemaGestionFrioExpress {
+    private final Inventario inventario;
+    // Cola de pedidos pendientes de despacho (requisito: LinkedList)
+    private final LinkedList<Pedido> colaPendientes = new LinkedList<>();
+
+    public SistemaGestionFrioExpress(Inventario inventario) {
+        this.inventario = inventario;
+    }
+
+    // Procesa un pedido verificando stock y crédito (lanza excepciones con throws)
+    public void procesarPedido(Pedido pedido)
+            throws ProductoNoCongeladoException, StockInsuficienteException,
+                   StockMinimoAlcanzadoException, LimiteCreditoExcedidoException {
+
+        double total = 0.0;
+
+        // 1) VALIDACIONES SIN MODIFICAR ESTADO (pre-chequeo)
+        for (PedidoItem it : pedido.getItems()) {
+            ProductoCongelado p = inventario.buscarProducto(it.codigoProducto); // puede lanzar ProductoNoCongeladoException
+
+            // Verificamos stock disponible y respeto del mínimo
+            double nuevoStock = p.getStockKg() - it.kilos;
+            if (it.kilos > p.getStockKg()) {
+                throw new StockInsuficienteException("Pedido " + pedido.getId() + ": stock insuficiente de " + p.getNombre());
+            }
+            if (nuevoStock <= p.getStockMinKg()) {
+                throw new StockMinimoAlcanzadoException("Pedido " + pedido.getId() + ": vender " + it.kilos +
+                        " kg de " + p.getNombre() + " violaría el stock mínimo (" + p.getStockMinKg() + " kg).");
+            }
+            total += it.kilos * p.getPrecioPorKg();
+        }
+
+        // 2) LÍMITE DE CRÉDITO
+        pedido.getCliente().cargarCompra(total); // puede lanzar LimiteCreditoExcedidoException
+
+        // 3) APLICAR CAMBIOS: SE DESCUENTA STOCK Y SE ENCOLA PARA DESPACHO
+        for (PedidoItem it : pedido.getItems()) {
+            ProductoCongelado p = inventario.buscarProducto(it.codigoProducto);
+            p.retirarStock(it.kilos); // puede lanzar excepciones si algo cambió entre validación y aplicación
+        }
+        pedido.setTotal(total);
+        colaPendientes.addLast(pedido); // queda pendiente de despacho
+    }
+
+    // Variante que maneja internamente los errores (ejemplo de try-catch requerido)
+    public void procesarPedidoSeguro(Pedido p) {
+        try {
+            procesarPedido(p);
+            System.out.println("OK -> " + p);
+        } catch (Exception e) {
+            System.out.println("ERROR procesando " + p.getId() + ": " + e.getMessage());
+        }
+    }
+
+    public List<Pedido> pedidosPendientes() {
+        return new ArrayList<>(colaPendientes);
+    }
+
+    // Simula despacho (saca de la cola)
+    public Optional<Pedido> despachar() {
+        if (colaPendientes.isEmpty()) return Optional.empty();
+        return Optional.of(colaPendientes.removeFirst());
+    }
+}
+
+// ======================= DEMO / CASOS DE PRUEBA ===========================
+
+public class FrioExpressApp {
+
+    public static void main(String[] args) {
+        // --- Inventario inicial ---
+        Inventario inv = new Inventario();
+
+        // 8+ productos (algunos cerca o por debajo del mínimo para la consulta)
+        inv.registrarProducto(new ProductoCongelado(1001, "Carne vacuna molida", Categoria.CARNES, -18, 500, 100, 350));
+        inv.registrarProducto(new ProductoCongelado(1002, "Pechuga de pollo",    Categoria.CARNES, -18, 300,  80, 250));
+        inv.registrarProducto(new ProductoCongelado(2001, "Filete de merluza",   Categoria.PESCADOS, -18, 200,  60, 400));
+        inv.registrarProducto(new ProductoCongelado(2002, "Anillas de calamar",  Categoria.PESCADOS, -18,  40,  30, 450)); // cerca del mínimo
+        inv.registrarProducto(new ProductoCongelado(3001, "Arvejas",             Categoria.VEGETALES, -18, 150,  50, 180));
+        inv.registrarProducto(new ProductoCongelado(3002, "Choclo en granos",    Categoria.VEGETALES, -18,  90,  50, 160));
+        inv.registrarProducto(new ProductoCongelado(3003, "Brócoli",             Categoria.VEGETALES, -18,  35,  40, 170)); // BAJO mínimo (para reporte)
+        inv.registrarProducto(new ProductoCongelado(4001, "Helado vainilla",     Categoria.HELADOS,  -18, 120,  40, 500));
+        inv.registrarProducto(new ProductoCongelado(4002, "Helado chocolate",    Categoria.HELADOS,  -18,  45,  40, 520));
+
+        // --- Clientes (4+) ---
+        Cliente c1 = new Cliente("20.123.456-0012", "Supermercado Sol", "Depósito Centro", 300_000, 0);
+        Cliente c2 = new Cliente("20.987.654-0019", "Restaurante Mar",  "Puerto 12",        150_000, 0);
+        Cliente c3 = new Cliente("20.876.543-0011", "Tienda Centro",    "Av. Norte 123",     80_000, 20_000);
+        Cliente c4 = new Cliente("20.765.432-0018", "Bar Norte",        "Ituzaingó 55",      50_000, 0);
+
+        SistemaGestionFrioExpress sistema = new SistemaGestionFrioExpress(inv);
+
+        // --------- Reporte inicial (iteración por inventario) ----------
+        System.out.println("=== INVENTARIO INICIAL ===");
+        for (ProductoCongelado p : inv) {
+            System.out.println(p);
+        }
+        System.out.println();
+
+        // ================== CASOS DE PRUEBA OBLIGATORIOS ==================
+
+        // 1) Procesamiento exitoso de un pedido dentro del límite de crédito
+        Pedido pedOK = new Pedido(c1);
+        pedOK.agregarItem(1001, 50);  // 50 kg carne
+        pedOK.agregarItem(4001, 10);  // 10 kg helado vainilla
+        sistema.procesarPedidoSeguro(pedOK); // usa try-catch interno
+
+        // 2) Intento de pedido que EXCEDE el stock disponible
+        Pedido pedExcedeStock = new Pedido(c2);
+        pedExcedeStock.agregarItem(1002, 9999); // clarísimamente más de lo disponible
+        sistema.procesarPedidoSeguro(pedExcedeStock);
+
+        // 3) Cliente que intenta exceder su LÍMITE de crédito
+        Pedido pedExcedeCredito = new Pedido(c4);
+        pedExcedeCredito.agregarItem(2001, 130); // 130 * $400 = $52.000 (crédito $50.000)
+        sistema.procesarPedidoSeguro(pedExcedeCredito);
+
+        // 4) Alerta por producto que rompe cadena de frío (>30 min fuera)
+        System.out.println("\n=== CONTROL DE TEMPERATURA ===");
+        try {
+            inv.registrarQuiebreCadenaFrio(4001, 45); // 45 minutos -> dispara excepción/alerta
+        } catch (CadenaFrioRotaException | ProductoNoCongeladoException e) {
+            System.out.println(e.getMessage());
+        }
+
+        // 5) Generación de reporte de productos BAJO stock mínimo
+        System.out.println("\n=== PRODUCTOS BAJO STOCK MÍNIMO ===");
+        for (ProductoCongelado p : inv.consultarBajoStockMinimo()) {
+            System.out.println(p);
+        }
+
+        // 6) Intento de despachar/procesar producto con CÓDIGO INEXISTENTE
+        Pedido pedCodigoInexistente = new Pedido(c1);
+        pedCodigoInexistente.agregarItem(9999, 5); // no existe
+        sistema.procesarPedidoSeguro(pedCodigoInexistente);
+
+        // --------- Otras operaciones del enunciado ---------
+
+        // Registrar ingreso de mercadería
+        try {
+            inv.registrarIngreso(3003, 20); // reponer brócoli
+            System.out.println("\nIngreso registrado: +20 kg al producto 3003 (Brócoli)");
+        } catch (ProductoNoCongeladoException e) {
+            System.out.println("Error al ingresar mercadería: " + e.getMessage());
+        }
+
+        // Consultar pedidos pendientes de despacho
+        System.out.println("\n=== PEDIDOS PENDIENTES DE DESPACHO ===");
+        for (Pedido p : sistema.pedidosPendientes()) {
+            System.out.println(p);
+        }
+
+        // Despachar el primer pedido en cola
+        sistema.despachar().ifPresent(p -> {
+            System.out.println("\nDespachado: " + p.getId() + " para " + p.getCliente().getRazonSocial());
+        });
+
+        // Mostrar alertas registradas
+        System.out.println("\n=== ALERTAS/SEGUIMIENTOS DE TEMPERATURA ===");
+        for (String a : inv.getAlertasTemperatura()) {
+            System.out.println(a);
+        }
+
+        // Estado final de inventario (muestra que quedó ordenado por código)
+        System.out.println("\n=== INVENTARIO FINAL ===");
+        for (ProductoCongelado p : inv) {
+            System.out.println(p);
+        }
+    }
+}
